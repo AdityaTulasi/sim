@@ -1,0 +1,1011 @@
+Software Design Document Content
+TM Simulation Software
+
+
+1. Overview of Document
+
+This Software Design Document (SDD) describes the design and internal structure of the TM Simulation Software. The software is a Java 8 desktop application developed using the Swing framework. It is used to configure, generate, edit, play back, export, and transmit telemetry (TM) frames to receiver/client systems over TCP/IP.
+
+The purpose of this document is to provide a technical design reference for developers, testers, maintainers, and project stakeholders. It explains the software architecture, major modules, dependencies, interfaces, and important runtime flows. The document also includes architecture, sequence, class, and use case diagrams using Mermaid notation.
+
+The software supports two major TM workflows:
+
+1. Generated TM workflow: TM frames are generated using parameters configured in the Config tab and transmitted using the Send tab.
+2. Playback TM workflow: Existing TM data is loaded from local files or NAS, extracted using frame sync patterns and frame length, edited if needed, and transmitted using the Playback TM tab.
+
+The application supports standard TM formats such as CCSDS, CCSDS-like, and Conventional formats. It also supports custom playback extraction using a user-defined frame length and frame sync code. The software can run on Windows and Linux/RHEL environments using Java.
+
+
+2. Software Architecture
+
+The TM Simulation Software follows a desktop client/server simulation architecture. The application itself acts as the simulator and TCP server. External receiver systems or UMACS clients connect to the simulator using the configured server IP address and port number.
+
+The main GUI class, AdsimFrame, coordinates the complete application behavior. It manages the Swing user interface, configuration inputs, frame generation, playback file loading, NAS access, frame editing, CRC/FECF handling, exporting, and TCP server startup.
+
+The architecture is divided into the following major layers:
+
+1. Presentation Layer
+   This layer contains the Java Swing GUI. It includes tabs for configuration, frame editing, Send TM, Playback TM, NAS loading, export, and TM viewing.
+
+2. TM Processing Layer
+   This layer handles TM frame generation, frame extraction, frame editing, spacecraft ID update, frame counter update, CRC/FECF calculation, and TM packet construction.
+
+3. Communication Layer
+   This layer provides TCP server functionality for generated TM and playback TM. It accepts client connections, performs the required request/response handshake, and streams TM frames.
+
+4. File and NAS Layer
+   This layer handles local TM file loading, NAS file browsing/downloading through SFTP, configuration save/load, and export of DAT/TMS output files.
+
+5. Documentation Layer
+   This layer consists of design documentation files and diagrams used for project understanding and maintainability.
+
+Software Architecture Diagram:
+
+```mermaid
+flowchart TB
+    Operator["Operator / User"]
+    Receiver["Receiver / UMACS Client"]
+    NAS["NAS / SFTP File Server"]
+    FS["Local File System\nConfigs, Exports, TM Files"]
+
+    subgraph App["TM Simulation Software (Java 8 Swing)"]
+        GUI["AdsimFrame\nMain Swing UI"]
+
+        subgraph Config["Config Tab"]
+            ConfigInput["Mission / TM Config Inputs\nFrame Length, FSC, SCID, VCID, Data Rate"]
+            FrameGen["TM Frame Generator\nmakeFrame(), FillData(), update headers"]
+            ConfigStore["Config Save/Load\n~/TM Simulation Software/config"]
+        end
+
+        subgraph FrameEditor["Frame Editor Tab"]
+            Editor["Generated Frame Editor\nWord/Subframe Updates"]
+            FECFEditor["Optional FECF Update\nCRC recalc or no CRC"]
+        end
+
+        subgraph SendTab["Send Tab"]
+            SendPreview["Send TM View\nAll VCIDs / Filtered View"]
+            TMServer1["TMServer\nGenerated TM TCP Server"]
+            Monitor1["TMSendMonitor\nFrame Scheduling, Counters, FECF"]
+            Sender1["TMDataSender\nPer-client writer + UMACS handshake"]
+        end
+
+        subgraph Playback["Playback TM Tab"]
+            LocalLoad["Load Local TM\nStandard or Custom Format"]
+            NASLoad["Load / Download NAS TM"]
+            Extractor["Frame Extraction\nSync Pattern + Frame Length"]
+            PlaybackEditor["Playback TM Editor\nSCID / Word Updates"]
+            PlaybackFECF["Playback Update FECF Checkbox"]
+            TMServer2["TMServer2\nPlayback TM TCP Server"]
+            Monitor2["TMSendMonitor2\nPlayback Frame Dispatch"]
+            Sender2["TMDataSender2\nPer-client writer + handshake"]
+        end
+    end
+
+    Operator --> GUI
+    GUI --> ConfigInput
+    ConfigInput --> FrameGen
+    GUI --> ConfigStore
+    ConfigStore <--> FS
+
+    FrameGen --> Editor
+    Editor --> FECFEditor
+    FrameGen --> SendPreview
+    FrameGen --> TMServer1
+    TMServer1 --> Monitor1
+    TMServer1 --> Sender1
+    Monitor1 --> Sender1
+    Sender1 --> Receiver
+
+    GUI --> LocalLoad
+    GUI --> NASLoad
+    NAS --> NASLoad
+    LocalLoad --> Extractor
+    NASLoad --> Extractor
+    FS --> LocalLoad
+    Extractor --> PlaybackEditor
+    PlaybackEditor --> PlaybackFECF
+    PlaybackEditor --> TMServer2
+    TMServer2 --> Monitor2
+    TMServer2 --> Sender2
+    Monitor2 --> Sender2
+    Sender2 --> Receiver
+
+    GUI --> FS
+```
+
+
+3. Module Decomposition
+
+The application is decomposed into several functional modules. Each module is responsible for a specific part of the TM simulation workflow.
+
+3.1 Main Application Module
+
+Classes:
+- AdSim
+- AdsimFrame
+
+Description:
+The AdSim class is the application entry point. It creates and displays the AdsimFrame window. AdsimFrame is the central GUI/controller class and contains most of the application logic. It manages tabs, user inputs, frame generation, playback loading, editing, sending, exporting, and status updates.
+
+Responsibilities:
+- Start the Swing application.
+- Display the main GUI.
+- Coordinate configuration, frame generation, playback, and sending.
+- Maintain shared application state such as frame arrays, uploaded frames, selected VCID, selected subframes, frame length, frame sync code, and data rate.
+
+
+3.2 Configuration Module
+
+Main class:
+- AdsimFrame
+
+Description:
+The Config tab allows the user to define TM frame parameters such as frame length, frame sync code, spacecraft ID, number of virtual channels, number of subframes, data rate, VCID, TM mode, and TM data type.
+
+Responsibilities:
+- Validate configuration inputs.
+- Save and load configuration files.
+- Update frame length and frame ID position.
+- Generate initial TM frames based on the selected configuration.
+- Display calculated information such as subframe time, master frame time, frame length, and spacecraft ID.
+
+Important behavior:
+- Configuration files are stored in the user home directory under:
+  TM Simulation Software/config
+- The user can enter a file name without .cnf; the software appends .cnf automatically.
+- Frame length and frame ID position are editable and affect generated TM frames.
+
+
+3.3 Generated TM Frame Module
+
+Main class:
+- AdsimFrame
+
+Description:
+This module generates simulated TM frames based on the selected configuration and data pattern. It builds TM headers, frame sync code, primary header fields, counters, payload/data pattern, CLCW if applicable, CRC/FECF, and packet tail.
+
+Responsibilities:
+- Initialize frame arrays.
+- Fill TM frame data with fixed, incremental, variable, or data-type-specific values.
+- Update frame sync code.
+- Update spacecraft ID and TM primary header fields.
+- Update master frame and VC frame counters.
+- Update or clear FECF as required.
+- Support different frame lengths and frame sync lengths.
+
+
+3.4 Frame Editor Module
+
+Main class:
+- AdsimFrame
+
+Description:
+The Frame Editor tab allows the user to view and modify generated TM frame words. It supports selecting a VCID, selecting subframes, updating word values, and optionally recalculating FECF.
+
+Responsibilities:
+- Display generated frame data.
+- Allow selected word updates.
+- Restrict reserved header/tail words from editing.
+- Apply updates to selected subframes.
+- Recalculate FECF when Update FECF is checked.
+- Clear or avoid CRC update when Update FECF is unchecked.
+
+Important behavior:
+- Reserved header range depends on the configured frame sync length.
+- For normal 4-byte FSC, the earlier reserved range is retained.
+- For 3-byte FSC, a shorter header layout is supported.
+
+
+3.5 Send TM Module
+
+Classes:
+- TMServer
+- TMSendMonitor
+- TMDataSender
+
+Description:
+The Send tab is used to transmit generated TM frames over TCP/IP. The simulator acts as a server. A receiver/UMACS client connects to the simulator IP and port.
+
+Responsibilities:
+- Start TCP server on configured server IP and port.
+- Accept up to the supported number of receiver clients.
+- Perform UMACS request/response handshake.
+- Send generated TM frames at the configured frame sending rate.
+- Update frame counters and FECF before sending.
+
+Important behavior:
+- The data rate is used to calculate frame sending period.
+- The application sends frames as a server, not as a client.
+- The receiver must connect to the simulator system's IP address and port.
+
+
+3.6 Playback TM Module
+
+Classes:
+- AdsimFrame
+- TMServer2
+- TMSendMonitor2
+- TMDataSender2
+- FrameExtractFromFile
+
+Description:
+The Playback TM tab loads existing TM data from local files or NAS. It extracts frames using a frame sync pattern and frame length. The user can edit loaded frames and transmit them to a receiver client.
+
+Responsibilities:
+- Load TM files from local storage.
+- Load or download TM files from NAS.
+- Detect standard frame sync patterns.
+- Support custom frame sync and frame length for non-standard formats.
+- View loaded frames by master frame/subframe.
+- Update spacecraft ID and selected words.
+- Optionally update or clear FECF.
+- Start playback TM TCP server and send frames.
+
+Supported standard patterns:
+- CCSDS: 1ACFFC1D
+- CCSDS-like: CAD107AC
+- Conventional: ACCA1F
+
+Custom local loading:
+- User can choose Others.
+- User enters frame length and frame sync code.
+- Software searches for the entered sync code and extracts frames of the entered length.
+
+
+3.7 NAS Access Module
+
+Classes:
+- AdsimFrame
+- JSch library classes
+
+Description:
+The NAS module connects to a remote NAS/SFTP server to browse, load, and download TM files.
+
+Responsibilities:
+- Connect to NAS using SFTP.
+- Browse directories and list RAW/DAT files.
+- Load selected NAS TM file.
+- Download NAS files using date/time filters.
+- Show progress/status during long operations to avoid appearing frozen.
+
+External library:
+- JSch is used for SSH/SFTP communication.
+
+
+3.8 Export Module
+
+Main class:
+- AdsimFrame
+
+Description:
+The Export module exports generated TM or playback TM data into output files.
+
+Responsibilities:
+- Export DAT and TMS files.
+- Support export with or without CCSDS encapsulation.
+- Support Procure and In-House export modes.
+- Store exported data under:
+  TM Simulation Software/exported data
+
+
+3.9 Documentation Module
+
+Files:
+- class_diagram.md
+- sequence_diagram.md
+- use_case_diagram.md
+- software_architecture.md
+- SDD_contents.txt
+
+Description:
+The documentation module contains Mermaid diagrams and text content used for the Software Design Document.
+
+
+4. Dependency Description
+
+4.1 External Library Dependencies
+
+The software depends on the following external libraries:
+
+1. JSch
+   Purpose:
+   Used for SSH/SFTP connection to NAS. It allows the software to browse directories, load files, and download files from the NAS server.
+
+2. PDFBox
+   Purpose:
+   Used for viewing/rendering PDF content such as the VCID reference document.
+
+3. FontBox
+   Purpose:
+   Required by PDFBox for font handling while rendering PDF files.
+
+4. Commons Logging
+   Purpose:
+   Required by PDFBox for logging support.
+
+5. Java Swing
+   Purpose:
+   Provides the desktop GUI framework.
+
+6. Java Networking API
+   Purpose:
+   Provides TCP server socket, client socket, and network interface functionality.
+
+7. Java I/O and ZIP APIs
+   Purpose:
+   Used for local file handling, DAT/TMS export, configuration storage, and ZIP file generation for NAS downloads.
+
+
+4.2 Inter-process Dependency
+
+The application interacts with external processes/systems through TCP/IP and SFTP.
+
+1. Receiver / UMACS Client Dependency
+
+The TM Simulation Software acts as a TCP server. Receiver software or UMACS client software acts as a TCP client. The receiver must connect to the simulator system's server IP address and port.
+
+Generated TM path:
+- Server class: TMServer
+- Monitor class: TMSendMonitor
+- Sender class: TMDataSender
+
+Playback TM path:
+- Server class: TMServer2
+- Monitor class: TMSendMonitor2
+- Sender class: TMDataSender2
+
+Handshake:
+- Client sends a 64-byte request message.
+- Simulator sends a 36-byte response message.
+- After handshake, TM frames are streamed to the client.
+
+Inter-process dependency summary:
+- Receiver must be reachable on the same network.
+- Receiver must connect to the configured simulator IP and port.
+- For handshake-enabled paths, receiver must send the expected request before TM data streaming begins.
+- If receiver does not send the request, sending waits at the handshake step.
+
+2. NAS / SFTP Server Dependency
+
+The application connects to the NAS system over SFTP using JSch.
+
+Dependency summary:
+- NAS host must be reachable from the simulator system.
+- SFTP credentials must be valid.
+- Expected directory structure must exist.
+- RAW/DAT files must be accessible.
+
+3. File System Dependency
+
+The application depends on the local file system for:
+- Reading local TM files.
+- Saving configuration files.
+- Loading configuration files.
+- Exporting DAT/TMS files.
+- Reading VCID reference PDF.
+
+The following folders are used:
+- TM Simulation Software/config
+- TM Simulation Software/exported data
+
+These folders are created automatically under the current user's home directory if they do not exist.
+
+
+4.3 Data Dependency
+
+The modules exchange and depend on several shared data structures.
+
+1. Generated frame data
+
+Data structure:
+- byte[][][] frame
+
+Meaning:
+- First dimension: VCID index
+- Second dimension: subframe index
+- Third dimension: full TM packet/frame bytes
+
+Used by:
+- Config module
+- Frame generation module
+- Frame Editor module
+- Send TM module
+- Export module
+
+Dependency:
+- Send TM depends on this frame data being generated before transmission.
+- Frame Editor depends on this frame data being initialized before editing.
+
+2. Playback frame data
+
+Data structures:
+- List<byte[]> uploadedFrames
+- List<byte[]> originalFrames
+
+Meaning:
+- uploadedFrames stores currently loaded/editable playback TM frames.
+- originalFrames stores the original copy used for reset operations.
+
+Used by:
+- Playback load module
+- Playback editor
+- Playback send module
+- Playback export module
+
+Dependency:
+- Playback send requires uploadedFrames to contain extracted frames.
+- Playback reset depends on originalFrames.
+
+3. Configuration data
+
+Important fields:
+- frameLen
+- frameSync
+- frameIDPos
+- satID
+- noOfVCID
+- noOfSubFr
+- DataRate
+- chosenTMdatatype
+- chosenTMvcid
+- chosenTMmode
+
+Used by:
+- Frame generation
+- Header update
+- Frame editor validation
+- Send timing
+- Export
+
+Dependency:
+- Generated TM behavior depends on valid configuration values.
+- Data rate controls frame sending period.
+
+4. CRC/FECF data
+
+Important behavior:
+- CRC/FECF is calculated using calculate_crc.
+- Generated TM uses updateFECF.
+- Playback TM uses playback-specific FECF update based on loaded frame sync length.
+- If Update FECF is unchecked, FECF bytes are cleared or not recalculated as required.
+
+Dependency:
+- Receiver CRC validation depends on correct FECF bytes.
+- Custom playback formats depend on correct sync length for CRC start position.
+
+5. Network data
+
+Important fields:
+- Server IP address
+- Port number
+- Data rate
+- TM frame bytes
+
+Used by:
+- TMServer / TMServer2
+- TMDataSender / TMDataSender2
+- TMSendMonitor / TMSendMonitor2
+
+Dependency:
+- Receiver must connect to correct IP and port.
+- Frame streaming depends on connected clients.
+
+
+5. Interface Description
+
+5.1 User Interface
+
+The user interface is implemented using Java Swing. The main window contains multiple tabs.
+
+Major UI tabs:
+
+1. Config Tab
+   Purpose:
+   Allows the user to configure TM frame generation parameters.
+
+   Main inputs:
+   - Frame length
+   - Number of virtual channels
+   - Number of subframes
+   - Data rate
+   - Frame sync code
+   - Spacecraft ID
+   - Frame ID position
+   - VCID and mode
+
+   Main actions:
+   - Update Config
+   - Save config
+   - Load config
+
+2. Frame Editor Tab
+   Purpose:
+   Allows editing of generated TM frames.
+
+   Main actions:
+   - Select VCID
+   - Select subframe
+   - Select multiple subframes
+   - Update word value
+   - Reset frame data
+   - Update/disable FECF update
+
+3. Send Tab
+   Purpose:
+   Sends generated TM frames to UMACS/receiver clients.
+
+   Main inputs:
+   - Server IP
+   - Port number
+   - Data rate
+
+   Main actions:
+   - Start TM to UMACS
+   - Stop TM to UMACS
+   - View generated TM frames
+   - Filter view by data type
+   - Export frames
+
+4. Playback TM Tab
+   Purpose:
+   Loads existing TM frames and sends them to a receiver client.
+
+   Main actions:
+   - Load Local TM
+   - Load from NAS
+   - Download from NAS
+   - Edit word value
+   - Update spacecraft ID
+   - Select subframes
+   - Update/disable FECF update
+   - Start playback sending
+   - Stop playback sending
+   - Export playback frames
+
+
+5.2 TCP Network Interface
+
+The software exposes TCP server interfaces for TM transmission.
+
+Generated TM server:
+- Class: TMServer
+- Client handler: TMDataSender
+- Monitor: TMSendMonitor
+
+Playback TM server:
+- Class: TMServer2
+- Client handler: TMDataSender2
+- Monitor: TMSendMonitor2
+
+Connection flow:
+1. User enters Server IP and Port.
+2. User clicks Start.
+3. Software opens server socket.
+4. Receiver client connects.
+5. Client sends request message.
+6. Simulator sends response message.
+7. Simulator streams TM frames at configured rate.
+
+
+5.3 File Interface
+
+Supported local TM input files:
+- .raw
+- .dat
+- .txt for local TM loading
+
+NAS input files:
+- .raw
+- .dat
+
+Configuration files:
+- .cnf
+
+Export files:
+- .dat
+- .tms
+
+Standard file locations:
+- Configs:
+  ~/TM Simulation Software/config
+- Exported data:
+  ~/TM Simulation Software/exported data
+
+
+5.4 NAS Interface
+
+NAS communication uses SFTP through JSch.
+
+NAS flow:
+1. Connect to NAS server.
+2. Select project/folder.
+3. Browse available TM files.
+4. Select file or date/time range.
+5. Load or download selected file(s).
+
+
+6. Sequence Diagram
+
+6.1 Generated TM Sending Sequence
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant GUI as AdsimFrame
+    participant Server as TMServer
+    participant Monitor as TMSendMonitor
+    participant Sender as TMDataSender
+    participant Client as Receiver/UMACS Client
+
+    User->>GUI: Configure TM and click Start TM to UMACS
+    GUI->>GUI: makeFrame(), update counters, update FECF
+    GUI->>Server: Create_TMServer(serverIp, port, dataRate)
+    GUI->>Server: setTMData(frame[][][])
+    GUI->>Server: setCounts(masterCount, vcidCount)
+    Server->>Monitor: start monitor thread
+    Client->>Server: connect()
+    Server->>Sender: create sender for client
+    Sender->>Monitor: clientConnected(clientNo)
+
+    Client->>Sender: 64-byte request message
+    Sender->>Client: 36-byte response message
+
+    loop at configured frame sending rate
+        Monitor->>Monitor: wait until next frame time
+        Monitor->>Monitor: update frame counters and FECF
+        Monitor->>Sender: getData(fullFrame)
+        Sender->>Client: write TM frame bytes
+        Sender->>Monitor: updateSent(clientNo)
+    end
+
+    User->>GUI: Click Stop
+    GUI->>Server: shutdown()
+    Server->>Monitor: shutdown()
+```
+
+
+6.2 Playback TM Sending Sequence
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant GUI as AdsimFrame
+    participant Extractor as FrameExtractFromFile
+    participant Server as TMServer2
+    participant Monitor as TMSendMonitor2
+    participant Sender as TMDataSender2
+    participant Client as Receiver/UMACS Client
+
+    User->>GUI: Load local TM / Load NAS / Download NAS
+
+    alt Load Local TM
+        GUI->>User: Select Standard Format or Others
+        alt Standard Format
+            GUI->>GUI: use default 256-byte extraction and auto-detect standard sync
+        else Others
+            User-->>GUI: Enter frame length and frame sync code
+        end
+    else Load NAS
+        GUI->>User: Ask playback frame length, default 256 bytes
+        User-->>GUI: Confirm or edit frame length
+    end
+
+    GUI->>GUI: detect or use selected sync pattern
+    GUI->>Extractor: extract frames by sync pattern and selected frame length
+    Extractor-->>GUI: extracted TM frames
+    GUI->>GUI: display frames in View TM
+
+    User->>GUI: Click Start
+    GUI->>Server: new TMServer2(serverIp, port)
+    Server->>Monitor: start monitor thread
+    Client->>Server: connect()
+    Server->>Sender: create sender for client
+    Sender->>Monitor: clientConnected(clientNo)
+
+    Client->>Sender: 64-byte request message
+    Sender->>Client: 36-byte response message
+
+    loop at configured frame sending rate
+        GUI->>GUI: build full frame from current uploaded frame
+        GUI->>Server: sendFrame(fullFrame)
+        Server->>Monitor: pushSingleFrame(fullFrame)
+        Monitor->>Sender: getData(fullFrame)
+        Sender->>Client: write TM frame bytes
+        Sender->>Monitor: updateSent(clientNo)
+        GUI->>GUI: advance current frame index
+    end
+
+    User->>GUI: Click Stop
+    GUI->>Server: shutdown()
+    Server->>Monitor: shutdown()
+```
+
+
+6.3 Playback TM Edit With FECF Option
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant GUI as AdsimFrame
+    participant Frames as uploadedFrames
+
+    User->>GUI: Select subframes and enter word/value or SCID
+    User->>GUI: Toggle Update FECF
+    GUI->>Frames: apply word/SCID update
+    alt Update FECF checked
+        GUI->>Frames: recalculate CRC into final two bytes
+    else Update FECF unchecked
+        GUI->>Frames: clear final two FECF bytes to 00 00
+    end
+    GUI->>GUI: refresh Playback TM view
+```
+
+
+7. Class Diagram
+
+```mermaid
+classDiagram
+    direction LR
+
+    class AdSim {
+        +main(String[] args)
+    }
+
+    class AdsimFrame {
+        <<JFrame>>
+        -byte[][][] frame
+        -TMServer activeTmServer
+        -TMServer2 tmServer2
+        -List~byte[]~ uploadedFrames
+        -List~byte[]~ originalFrames
+        -JCheckBox uploadUpdateFECF
+        +AdsimFrame()
+        +makeFrame()
+        +makeFrame(int v)
+        +makeFrame(int v, int x)
+        +updateFECF(int v, int x)
+        +calculate_crc(short seed, byte[] buf, int len) short
+        +exportfile()
+        +exportUploadedFile()
+        +savefile()
+        +loadfile()
+        -showLocalPlaybackLoadOptionsDialog() PlaybackLoadOptions
+        -processRawFile(File file, int frameLength, String syncPattern)
+        -applyPlaybackFECF(byte[] frame)
+    }
+
+    class PlaybackLoadOptions {
+        -int frameLength
+        -String syncPattern
+    }
+
+    class TMServer {
+        <<Runnable>>
+        -ServerSocket server
+        -TMSendMonitor monitor
+        -byte[][][] tmData
+        -String bindHost
+        +setTMData(byte[][][] value)
+        +setCounts(int[] msframecnt, int[] vcframecnt)
+        +isACSS(boolean acss)
+        +setFscIncludeFlag(boolean value)
+        +shutdown()
+        +run()
+    }
+
+    class TMSendMonitor {
+        <<Runnable>>
+        -ArrayList~TMDataSender~ clients
+        -byte[][][] tmData
+        -int[] mcCount
+        -int[] vcCount
+        +setTMData(byte[][][] value)
+        +setCounts(int[] msframecnt, int[] vcframecnt)
+        +clientConnected(int clientNo, TMDataSender client)
+        +clientDisconnected(int clientNo)
+        +updateSent(int clientNo)
+        +getFreeClientNumber() int
+        +run()
+    }
+
+    class TMDataSender {
+        <<Runnable>>
+        -Socket socket
+        -TMSendMonitor monitor
+        -byte[] frame
+        -boolean is_umacs
+        +setTMSendMonitor(TMSendMonitor value)
+        +getData(byte[] value)
+        +Accept(int accept)
+        +run()
+    }
+
+    class TMServer2 {
+        <<Runnable>>
+        -ServerSocket server
+        -TMSendMonitor2 monitor
+        -String bindHost
+        -boolean useHandshake
+        +sendFrames(List~byte[]~ packets)
+        +sendFrame(byte[] frame)
+        +startSending()
+        +stopSending()
+        +setLoop(boolean value)
+        +setReplayTimes(List~Long~ times)
+        +shutdown()
+        +run()
+    }
+
+    class TMSendMonitor2 {
+        <<Runnable>>
+        -List~TMDataSender2~ clients
+        -List~byte[]~ frames
+        -List~Long~ replayTimes
+        +setFrames(List~byte[]~ list)
+        +pushSingleFrame(byte[] frame)
+        +startSending()
+        +stopSending()
+        +clientConnected(int clientNo, TMDataSender2 client)
+        +clientDisconnected(int clientNo)
+        +getFreeClientNumber() int
+        +run()
+    }
+
+    class TMDataSender2 {
+        <<Runnable>>
+        -Socket socket
+        -TMSendMonitor2 monitor
+        -byte[] frame
+        -boolean useHandshake
+        +getData(byte[] value)
+        +close()
+        +run()
+    }
+
+    class FrameExtractFromFile {
+        +extractFrame(String hexData, String pattern, int frameSize) List~String~
+        +addSpacesBetweenBytes(String hexFrame) String
+    }
+
+    class selectSubframe {
+        <<JDialog>>
+        +selectSubframe(int subframesPerMF, JLabel lblSelectedSubframes)
+        +buildSubframeGrid()
+        +getSelectedSubframes() List~Integer~
+    }
+
+    AdSim --> AdsimFrame : starts GUI
+    AdsimFrame --|> JFrame
+    AdsimFrame --> TMServer : generated TM sending
+    AdsimFrame --> TMServer2 : playback TM sending
+    AdsimFrame --> FrameExtractFromFile : extracts TM frames
+    AdsimFrame --> PlaybackLoadOptions : local load options
+    AdsimFrame --> selectSubframe : chooses subframes
+
+    TMServer --> TMSendMonitor : owns monitor
+    TMServer --> TMDataSender : creates per client
+    TMSendMonitor "1" o-- "0..8" TMDataSender : dispatches frames
+    TMDataSender --> TMSendMonitor : sent/disconnected callback
+
+    TMServer2 --> TMSendMonitor2 : owns monitor
+    TMServer2 --> TMDataSender2 : creates per client
+    TMSendMonitor2 "1" o-- "0..8" TMDataSender2 : dispatches frames
+    TMDataSender2 --> TMSendMonitor2 : sent/disconnected callback
+```
+
+
+8. Use Case Diagram
+
+```mermaid
+flowchart LR
+    User["Operator / User"]
+    Client["Receiver / UMACS Client"]
+    NAS["NAS / Remote File Server"]
+
+    subgraph System["TM Simulation Software"]
+        UC1(("Configure TM Parameters"))
+        UC2(("Generate TM Frames"))
+        UC3(("Edit TM Frame Words"))
+        UC4(("Select Subframes"))
+        UC5(("Start Generated TM Sending"))
+        UC6(("Load Local TM File"))
+        UC7(("Load TM From NAS"))
+        UC8(("Download NAS TM Files"))
+        UC9(("Auto Detect TM Pattern"))
+        UC20(("Select Playback Frame Length"))
+        UC21(("Select Custom Playback Format"))
+        UC10(("View Playback TM Frames"))
+        UC11(("Edit Playback TM"))
+        UC22(("Toggle Playback FECF Update"))
+        UC12(("Start Playback TM Sending"))
+        UC13(("Perform Client Handshake"))
+        UC14(("Send TM Frames at Data Rate"))
+        UC15(("Export Generated TM"))
+        UC16(("Export Playback TM"))
+        UC17(("Save Configuration"))
+        UC18(("Load Configuration"))
+        UC19(("View VCID Reference"))
+    end
+
+    User --> UC1
+    User --> UC2
+    User --> UC3
+    User --> UC4
+    User --> UC5
+    User --> UC6
+    User --> UC7
+    User --> UC8
+    User --> UC10
+    User --> UC11
+    User --> UC12
+    User --> UC15
+    User --> UC16
+    User --> UC17
+    User --> UC18
+    User --> UC19
+    User --> UC21
+    User --> UC22
+
+    NAS --> UC7
+    NAS --> UC8
+
+    Client --> UC13
+    Client --> UC14
+
+    UC5 --> UC13
+    UC5 --> UC14
+    UC12 --> UC13
+    UC12 --> UC14
+    UC6 --> UC9
+    UC6 --> UC21
+    UC7 --> UC9
+    UC8 --> UC9
+    UC6 --> UC20
+    UC7 --> UC20
+    UC20 --> UC9
+    UC9 --> UC10
+    UC11 --> UC22
+    UC3 --> UC4
+    UC11 --> UC4
+```
+
+Use case summary:
+
+1. Configure TM Parameters
+   The operator sets frame length, FSC, SCID, VCID, TM mode, frame ID position, and data rate.
+
+2. Generate TM Frames
+   The software creates simulated TM frames based on the configured parameters.
+
+3. Edit TM Frame Words
+   The operator updates generated TM frame words in selected subframes.
+
+4. Start Generated TM Sending
+   The software starts the generated TM TCP server and sends frames to receiver clients.
+
+5. Load Local TM File
+   The operator loads RAW, DAT, or TXT TM files from the local system.
+
+6. Select Custom Playback Format
+   The operator selects Standard or Others. In Others mode, the operator provides custom frame length and FSC.
+
+7. Load TM From NAS
+   The operator loads TM files from NAS using SFTP.
+
+8. Edit Playback TM
+   The operator updates selected words or spacecraft ID in loaded playback frames.
+
+9. Toggle Playback FECF Update
+   The operator chooses whether edits recalculate FECF or clear final FECF bytes.
+
+10. Start Playback TM Sending
+    The software starts the playback TM TCP server and sends loaded frames to receiver clients.
+
+11. Export Generated/Playback TM
+    The software exports TM data into DAT/TMS files in the exported data folder.
+
+12. Save/Load Configuration
+    The software stores and retrieves .cnf configuration files.
+
+
+End of SDD Content
